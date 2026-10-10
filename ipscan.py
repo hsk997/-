@@ -178,6 +178,13 @@ class NirSoftCFScanner:
                 self.rules_overlay.place_forget()
             except Exception:
                 pass
+        # 所有功能页共用主列表区域，打开测速页前关闭 CF 额度页。
+        try:
+            if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
+                if self.quota_button.cget("text") == "返回":
+                    self.quota_button.invoke()
+        except Exception:
+            pass
         self.speed_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
         self.speed_panel_button.config(text="返回", command=self.close_speed_test_panel)
         self.speed_overlay.lift()
@@ -2126,6 +2133,17 @@ class NirSoftCFScanner:
                 self.close_node_config()
         except Exception:
             pass
+        # 规则页打开时，先关闭测速页和 CF 额度页。
+        try:
+            self.close_speed_test_panel()
+        except Exception:
+            pass
+        try:
+            if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
+                if self.quota_button.cget("text") == "返回":
+                    self.quota_button.invoke()
+        except Exception:
+            pass
 
         self.rules_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
         self.rules_overlay.lift()
@@ -2224,6 +2242,15 @@ class NirSoftCFScanner:
             if self.cf_quota_dialog is not None and self.cf_quota_dialog.winfo_exists():
                 if self.quota_button.cget("text") == "返回":
                     self.quota_button.invoke()
+        except Exception:
+            pass
+        # 扫描配置页与测速、规则页互斥。
+        try:
+            self.close_speed_test_panel()
+        except Exception:
+            pass
+        try:
+            self.close_rules_settings()
         except Exception:
             pass
 
@@ -4475,6 +4502,15 @@ class NirSoftCFScanner:
         try:
             if getattr(self, "config_mode", False):
                 self.close_node_config()
+        except Exception:
+            pass
+        # CF 额度页与测速、规则页互斥。
+        try:
+            self.close_speed_test_panel()
+        except Exception:
+            pass
+        try:
+            self.close_rules_settings()
         except Exception:
             pass
 
