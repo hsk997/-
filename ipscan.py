@@ -1370,8 +1370,11 @@ class NirSoftCFScanner:
     # ========================================================
 
     def load_node_configs(self):
-        """读取六账户配置：一个账户一个 UUID，可绑定多个 SNI/域名。"""
-        self.node_configs = []
+        """按 Account1~Account6 固定编号读取配置，空账户也保留原位置。"""
+        self.node_configs = [
+            {"account": i, "uuid": "", "snis": [], "sni": ""}
+            for i in range(1, 7)
+        ]
         try:
             if os.path.isfile(self.config_file):
                 parser = configparser.ConfigParser()
@@ -1379,10 +1382,7 @@ class NirSoftCFScanner:
                 self.saved_subnets = parser.get("Scan", "subnets", fallback="").strip()
                 self.saved_ports = parser.get("Scan", "ports", fallback="").strip()
                 self.saved_workers = parser.get("Scan", "workers", fallback="").strip()
-                # 兼容旧 config.ini，但扫描协议统一固定为 WS。
                 self.transport_protocol = "ws"
-
-                # 读取上次用户拖动后的主窗口表头宽度。
                 for col, default_width in self.column_widths.items():
                     try:
                         width = parser.getint("UI", f"column_{col}", fallback=default_width)
@@ -1391,37 +1391,35 @@ class NirSoftCFScanner:
                     except Exception:
                         pass
 
-                sections = []
+                # 按编号放入固定槽位，不把空的 Account2 跳过去。
                 for section in parser.sections():
-                    low = section.lower()
-                    prefix = "account" if low.startswith("account") else ("node" if low.startswith("node") else "")
-                    if not prefix: continue
-                    try: number = int(section[len(prefix):])
-                    except Exception: number = 999999
-                    sections.append((number, section))
-                sections.sort(key=lambda x: x[0])
-                shared_uuid = ""
-                for number, section in sections:
+                    match = re.fullmatch(r"(?:Account|Node)(\d+)", section, flags=re.I)
+                    if not match:
+                        continue
+                    number = int(match.group(1))
+                    if not 1 <= number <= 6:
+                        continue
                     uuid = parser.get(section, "uuid", fallback="").strip()
                     raw = parser.get(section, "sni", fallback="").strip()
-                    snis = list(dict.fromkeys([x.strip() for x in re.split(r"[,，;；\n]+", raw) if x.strip()]))
-                    if number == 1 and uuid:
-                        shared_uuid = uuid
-                    if snis or uuid:
-                        self.node_configs.append({"account": number, "uuid": uuid, "snis": snis, "sni": snis[0] if snis else ""})
+                    snis = list(dict.fromkeys(
+                        x.strip() for x in re.split(r"[,，;；\n]+", raw) if x.strip()
+                    ))
+                    self.node_configs[number - 1] = {
+                        "account": number, "uuid": uuid,
+                        "snis": snis, "sni": snis[0] if snis else ""
+                    }
+
+                # 本程序的配置约定为六个账户共用 Account1 的公共 UUID。
+                shared_uuid = self.node_configs[0].get("uuid", "").strip()
                 if shared_uuid:
                     for item in self.node_configs:
                         item["uuid"] = shared_uuid
         except Exception as e:
             print("读取 config.ini 失败:", e)
-        while len(self.node_configs) < 6:
-            self.node_configs.append({"account": len(self.node_configs)+1, "uuid": "", "snis": [], "sni": ""})
+
         self.node_configs = self.node_configs[:6]
-        # 初始化动态上传账户缓存：优先使用已保存的有效 SNI；自动发现完成后会刷新。
         self.incremental_upload_accounts = {}
         for item in self.node_configs:
-            if not isinstance(item, dict):
-                continue
             try:
                 account_no = int(item.get("account") or 0)
             except Exception:
@@ -1431,7 +1429,7 @@ class NirSoftCFScanner:
                 values = [item.get("sni")]
             host = str((values or [""])[0]).strip()
             host = re.sub(r"^https?://", "", host, flags=re.I).split("/", 1)[0].strip()
-            if account_no > 0 and host:
+            if 1 <= account_no <= 6 and host:
                 self.incremental_upload_accounts[account_no] = host
         self.config_index = 0
         self._account_sni_pos = [0] * len(self.node_configs)
@@ -1478,7 +1476,7 @@ class NirSoftCFScanner:
             print("自动创建 config.ini 失败:", repr(e))
 
     def save_node_configs_file(self):
-        """保存配置；空白/占位提示绝不能覆盖已保存的 UUID/SNI。"""
+        """保存配置；固定六行对应六账户，显式空行可清空，空白占位不覆盖数据。"""
         parser = configparser.ConfigParser()
         subnet_lines = [
             x.strip()
@@ -1494,7 +1492,6 @@ class NirSoftCFScanner:
             "protocol": "ws",
         }
 
-        # 先从内存中已有的六账户配置建立安全备份。
         existing_snis = []
         shared_uuid = ""
         for i in range(6):
@@ -1502,11 +1499,12 @@ class NirSoftCFScanner:
             values = item.get("snis") if isinstance(item.get("snis"), list) else []
             if not values and item.get("sni"):
                 values = [item.get("sni")]
-            existing_snis.append(",".join(dict.fromkeys(str(x).strip() for x in values if str(x).strip())))
+            existing_snis.append(",".join(dict.fromkeys(
+                str(x).strip() for x in values if str(x).strip()
+            )))
             if i == 0 and item.get("uuid"):
                 shared_uuid = str(item.get("uuid", "")).strip()
 
-        # 如果 config.ini 中有有效内容，以磁盘内容作为第二层备份。
         try:
             if os.path.isfile(self.config_file):
                 old = configparser.ConfigParser()
@@ -1521,51 +1519,58 @@ class NirSoftCFScanner:
         except Exception as e:
             print("读取旧 UUID/SNI 备份失败，继续使用内存配置:", e)
 
-        # 只有文本框不是占位提示且确实有内容时，才把它视为用户/自动获取的新数据。
         raw_sni_uuid = ""
         try:
             if not getattr(self, "_sni_uuid_placeholder_active", False):
-                raw_sni_uuid = self.config_sni_uuid_entry.get("1.0", "end-1c").strip()
+                raw_sni_uuid = self.config_sni_uuid_entry.get("1.0", "end-1c")
         except Exception:
             raw_sni_uuid = ""
 
-        if raw_sni_uuid:
-            lines = [x.strip() for x in raw_sni_uuid.splitlines() if x.strip()]
+        if raw_sni_uuid.strip():
+            raw_lines = raw_sni_uuid.split("\n")
             parsed_uuid = ""
-            parsed_snis = []
-            for value in lines:
-                if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", value):
-                    parsed_uuid = value
-                elif value.startswith("公共UUID"):
-                    candidate = re.split(r"[/：:]", value, maxsplit=1)[-1].strip()
+            sni_rows = []
+            for value in raw_lines:
+                stripped = value.strip()
+                if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", stripped):
+                    parsed_uuid = stripped
+                    continue
+                if stripped.startswith("公共UUID"):
+                    candidate = re.split(r"[/：:]", stripped, maxsplit=1)[-1].strip()
                     if candidate:
                         parsed_uuid = candidate
-                else:
-                    parsed_snis.append(value)
+                    continue
+                sni_rows.append(stripped)
 
-            # 有 UUID 才更新 UUID；没有解析出 UUID 时保留旧 UUID。
             if parsed_uuid:
                 shared_uuid = parsed_uuid
 
-            # 至少解析出一个 SNI 时才更新列表；短暂空白不会清空所有账户。
-            if parsed_snis:
+            # 只有完整六行才视为六账户编辑结果；短文本不会误清空所有 SNI。
+            if len(sni_rows) >= 6:
                 for i in range(6):
-                    if i < len(parsed_snis) and parsed_snis[i].strip():
-                        existing_snis[i] = parsed_snis[i].strip()
+                    row = sni_rows[i]
+                    if "|" in row:
+                        _, row = row.split("|", 1)
+                    if "/" in row:
+                        left, inline_uuid = row.split("/", 1)
+                        row = left.strip()
+                        if not parsed_uuid and not shared_uuid:
+                            shared_uuid = inline_uuid.strip()
+                    values = list(dict.fromkeys(
+                        x.strip() for x in re.split(r"[,，;；]+", row) if x.strip()
+                    ))
+                    existing_snis[i] = ",".join(values)
 
-        # 六账户统一使用公共 UUID；保留每个账户已有的 SNI，不用空行覆盖。
         for i in range(6):
             parser[f"Account{i + 1}"] = {
                 "uuid": shared_uuid,
                 "sni": existing_snis[i],
             }
-
         parser["UI"] = {
             f"column_{col}": str(width)
             for col, width in self.column_widths.items()
         }
 
-        # 原子写入，避免写到一半中断导致配置文件损坏。
         tmp_file = self.config_file + ".tmp"
         try:
             with open(tmp_file, "w", encoding="utf-8", newline="") as f:
@@ -1893,26 +1898,8 @@ class NirSoftCFScanner:
 
                     success_count = sum(1 for _, info, _ in results if info is not None)
 
-                    # 自动获取结果直接写入 SNI 文本框，不经过当前行/配置页状态转换。
-                    # 这样获取到的 6 个域名会立即按账户 1→6 显示。
-                    display_lines = []
-                    for i in range(6):
-                        result_item = next((x for x in results if x[0] == i), None)
-                        info = result_item[1] if result_item else None
-                        snis = []
-                        if isinstance(info, dict):
-                            snis = [str(x).strip() for x in (info.get("snis") or []) if str(x).strip()]
-                        display_lines.append(",".join(dict.fromkeys(snis)))
-                    if shared_uuid:
-                        display_lines.append(shared_uuid)
-
-                    self.config_sni_uuid_entry.config(state="normal")
-                    self.config_sni_uuid_entry.delete("1.0", "end")
-                    self.config_sni_uuid_entry.tag_remove("sni_uuid_placeholder", "1.0", "end")
-                    self._sni_uuid_placeholder_active = False
-                    self.config_sni_uuid_entry.insert("1.0", "\n".join(display_lines) + "\n")
-                    self._config_read_current()
-
+                    # 仅覆盖获取成功的账户；失败账户保留原 SNI，避免自动获取造成数据丢失。
+                    self._config_show_current()
                     if shared_uuid:
                         self.save_node_configs_file()
                     self.config_index = min(self.config_index, len(self.node_configs) - 1)
@@ -1957,18 +1944,17 @@ class NirSoftCFScanner:
             self._set_sni_uuid_placeholder()
 
     def _config_read_current(self):
-        """解析全部 SNI 与公共 UUID 后再统一赋值，避免 UUID 位于末行时前六项丢失。"""
+        """解析六个固定 SNI 行和公共 UUID；空行保留对应账户位置。"""
         self.transport_protocol = "ws"
         raw = "" if getattr(self, "_sni_uuid_placeholder_active", False) else self.config_sni_uuid_entry.get("1.0", "end-1c")
-        sni_lines = []
-        shared_uuid = ""
+        if not raw.strip():
+            return
 
-        # 先完整扫描所有行，先找出 UUID；不能边读边创建账户配置，
-        # 因为 UUID 通常放在最后一行，边读边建会导致账户1~6拿到空 UUID。
-        for line in raw.splitlines():
+        raw_lines = raw.split("\n")
+        shared_uuid = ""
+        sni_rows = []
+        for line in raw_lines:
             value = line.strip()
-            if not value:
-                continue
             if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", value):
                 shared_uuid = value
                 continue
@@ -1977,40 +1963,35 @@ class NirSoftCFScanner:
                 if candidate:
                     shared_uuid = candidate
                 continue
-            sni_lines.append(value)
+            sni_rows.append(value)
+
+        # UUID 之外不足六行表示非标准/局部文本，不擅自清空账户。
+        if len(sni_rows) < 6:
+            return
 
         configs = []
-        for index, value in enumerate(sni_lines[:6], 1):
+        for index, value in enumerate(sni_rows[:6], 1):
             if "|" in value:
                 _, value = value.split("|", 1)
+            inline_uuid = ""
             if "/" in value:
-                left, inline_uuid = value.split("/", 1)
+                left, candidate_uuid = value.split("/", 1)
                 value = left.strip()
                 if not shared_uuid:
-                    shared_uuid = inline_uuid.strip()
-
+                    inline_uuid = candidate_uuid.strip()
             snis = list(dict.fromkeys(
                 x.strip() for x in re.split(r"[,，;；]+", value) if x.strip()
             ))
             configs.append({
                 "account": index,
-                "uuid": shared_uuid,
+                "uuid": shared_uuid or inline_uuid,
                 "snis": snis,
                 "sni": snis[0] if snis else ""
             })
 
-        while len(configs) < 6:
-            configs.append({
-                "account": len(configs) + 1,
-                "uuid": shared_uuid,
-                "snis": [],
-                "sni": ""
-            })
-
-        # 最终再统一设置，确保所有账户都得到同一个公共 UUID。
         for item in configs:
-            item["uuid"] = shared_uuid
-        self.node_configs = configs[:6]
+            item["uuid"] = shared_uuid or item.get("uuid", "")
+        self.node_configs = configs
         self._account_sni_pos = [0] * len(self.node_configs)
         self.config_index = max(0, min(getattr(self, "config_index", 0), len(self.node_configs) - 1))
 
